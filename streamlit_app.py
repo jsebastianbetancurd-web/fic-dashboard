@@ -49,7 +49,7 @@ PUBLISHED_URL = (os.environ.get("FIC_DATOS_URL")
                  or "https://github.com/jsebastianbetancurd-web/fic-dashboard/releases/download/datos")
 STATE_FILE = "estado.json"
 CHECK_EVERY_S = 3600             # how often the app looks for a newer publication
-STALE_DAYS = 3                   # a publication older than this: the daily update is not running
+STALE_DAYS = 3                   # no daily check for longer than this: the app says so
 DUCKDB_PUBLISHED = {"memory_limit": "600MB", "threads": 2}      # Streamlit's free hosting: about 690 MB
 TABLES = ("dim_fondo", "dim_serie", "fact_diario", "fact_rentabilidad", "fact_volatilidad", "fact_fichas",
           "fact_rentabilidad_bruta", "resumen_bruta")
@@ -109,7 +109,7 @@ def _published() -> tuple[str, dict]:
     """Folder with the newest publication, and its estado.json. A download that fails or does not
     match the sizes in estado.json is dropped: the newest publication already here is used."""
     WORK_DIR.mkdir(parents=True, exist_ok=True)
-    error = None
+    error = estado = None
     try:
         with urllib.request.urlopen(f"{PUBLISHED_URL}/{STATE_FILE}", timeout=60) as r:
             estado = json.loads(r.read().decode("utf-8"))
@@ -132,7 +132,10 @@ def _published() -> tuple[str, dict]:
         raise RuntimeError(f"No se pudieron descargar los datos publicados ({PUBLISHED_URL}): {error}")
     for old in ready[:-2]:                       # the previous one stays for sessions still reading it
         shutil.rmtree(old, ignore_errors=True)
-    return str(ready[-1]), json.loads((ready[-1] / STATE_FILE).read_text(encoding="utf-8"))
+    saved = json.loads((ready[-1] / STATE_FILE).read_text(encoding="utf-8"))
+    if estado and estado.get("publicado") == saved["publicado"]:
+        saved = estado                           # same data, with the time of the last daily check
+    return str(ready[-1]), saved
 
 
 def _source() -> tuple[str, tuple]:
@@ -152,7 +155,19 @@ def data_stamp() -> datetime:
     """When the tables were exported (this PC) or published (Streamlit), in UTC."""
     if LOCAL:
         return datetime.fromtimestamp(max(m for _, m in _signature()), timezone.utc)
-    return datetime.strptime(_published()[1]["publicado"][:20], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    return _utc(_published()[1]["publicado"])
+
+
+def last_check() -> datetime:
+    """When the daily update last ran (it uploads the time even when SFC brought nothing new)."""
+    if LOCAL:
+        return data_stamp()
+    estado = _published()[1]
+    return _utc(estado.get("revisado") or estado["publicado"])
+
+
+def _utc(stamp: str) -> datetime:
+    return datetime.strptime(stamp[:20], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
 @st.cache_resource(show_spinner=False, max_entries=2)
@@ -522,10 +537,10 @@ st.caption("Rentabilidades efectivas anuales (año de 365 días). **Neta**: desp
            "(valor de la unidad que reporta la SFC). **Bruta**: antes de la comisión de administración, una sola por "
            "fondo. Cada cifra es de un fondo o de una participación: no hay promedios por categoría. El detalle está "
            "en la pestaña «Qué es y qué no es».")
-dias_sin_publicar = (datetime.now(timezone.utc) - publicado).days
-if not LOCAL and dias_sin_publicar > STALE_DAYS:
-    st.warning(f"La última publicación tiene {dias_sin_publicar} días: la actualización diaria no ha corrido. "
-               "Los datos de abajo son los de esa fecha.")
+dias_sin_revisar = (datetime.now(timezone.utc) - last_check()).days
+if not LOCAL and dias_sin_revisar > STALE_DAYS:
+    st.warning(f"La actualización diaria no corre desde hace {dias_sin_revisar} días. "
+               f"Los datos de abajo son los de la última publicación ({publicado - timedelta(hours=5):%Y-%m-%d}).")
 if cutoff > d_ok:
     st.warning("La fecha de corte es posterior al último día completo: muchas participaciones aún no reportan ese día.")
 if v.empty:
