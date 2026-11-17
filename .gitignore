@@ -1,0 +1,4 @@
+# The tables are published as files of the release "datos", not in the repo
+datos/
+__pycache__/
+.venv/
